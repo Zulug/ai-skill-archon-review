@@ -11,8 +11,9 @@ $events = @(Get-Content -LiteralPath $log.FullName -Encoding UTF8 | ForEach-Obje
     if (-not [string]::IsNullOrWhiteSpace($_)) { ConvertFrom-Json -InputObject $_ }
 })
 $start = $events | Where-Object type -eq 'workflow_start' | Select-Object -First 1
-if (-not $start -or $start.workflow_name -ne 'plastic-feature-review') {
-    throw 'Use the JSONL transcript of a plastic-feature-review run.'
+# plastic-feature-review is the workflow's former name, kept for earlier transcripts.
+if (-not $start -or $start.workflow_name -notin @('feature-review', 'plastic-feature-review')) {
+    throw 'Use the JSONL transcript of a feature-review run.'
 }
 $runId = [guid]::Empty
 if (-not [guid]::TryParse($start.workflow_id, [ref]$runId)) { throw 'The Archon run ID is missing or invalid.' }

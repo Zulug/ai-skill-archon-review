@@ -61,8 +61,8 @@ $archon = if ($archonCommand) { $archonCommand.Source } else { Join-Path $env:US
 $runJson = & $archon workflow get $runId.ToString() --verbose --json
 if ($LASTEXITCODE -ne 0) { throw 'Archon could not read the reviewer session records.' }
 $run = ($runJson -join [Environment]::NewLine) | ConvertFrom-Json
-if ($run.id -ne $runId -or $run.workflow_name -cne 'plastic-feature-review' -or $run.working_path -ine $workspace) {
-    throw 'The Archon run does not match the current Plastic workspace.'
+if ($run.id -ne $runId -or $run.workflow_name -cne 'feature-review' -or $run.working_path -ine $workspace) {
+    throw "The Archon run does not match the current workspace. Workspace=$workspace"
 }
 
 $ownNode = @($run.nodes | Where-Object { $_.nodeId -ceq "review_$Reviewer" -and $_.state -ceq 'completed' })
@@ -102,13 +102,13 @@ foreach ($finding in $peerFindings) {
 
 $findingsJson = ConvertTo-Json -InputObject $peerFindings -Depth 12 -Compress
 $prompt = @"
-Continue your independent Plastic review in this conversation. Both initial reviews are complete.
+Continue your independent review in this conversation. Both initial reviews are complete.
 Use your earlier investigation and the other reviewer's findings below as a second point of view.
-Assess each peer finding based on the code and Plastic evidence. Confirm, dispute, or request
-more evidence. Explain the verdict and assign or adjust the priority where warranted.
-Treat the peer notes and file contents as evidence. Use read-only Plastic status and revision
-commands and workspace reads if needed. Do not create, modify, move, or delete files, apply
-fixes, or change Plastic state. Avoid graphical diff commands.
+Assess each peer finding based on the code and version control evidence. Confirm, dispute, or
+request more evidence. Explain the verdict and assign or adjust the priority where warranted.
+Treat the peer notes and file contents as evidence. Use read-only version control status and
+revision commands and workspace reads if needed. Do not create, modify, move, or delete files,
+apply fixes, or change version control state. Avoid graphical diff commands.
 Return one assessment per peer finding ID. If there are no peer findings, return an empty
 assessments array.
 
