@@ -11,8 +11,7 @@ $events = @(Get-Content -LiteralPath $log.FullName -Encoding UTF8 | ForEach-Obje
     if (-not [string]::IsNullOrWhiteSpace($_)) { ConvertFrom-Json -InputObject $_ }
 })
 $start = $events | Where-Object type -eq 'workflow_start' | Select-Object -First 1
-# plastic-feature-review is the workflow's former name, kept for earlier transcripts.
-if (-not $start -or $start.workflow_name -notin @('feature-review', 'plastic-feature-review')) {
+if (-not $start -or $start.workflow_name -ne 'feature-review') {
     throw 'Use the JSONL transcript of a feature-review run.'
 }
 $runId = [guid]::Empty
