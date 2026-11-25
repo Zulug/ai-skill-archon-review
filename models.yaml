@@ -1,0 +1,5 @@
+aliases:
+  '@implementer': { provider: codex, model: gpt-6.2-sol, effort: medium }
+  '@reviewer-a': { provider: codex, model: gpt-6.2-sol, effort: high }
+  '@reviewer-b': { provider: claude, model: claude-opus-5-5, effort: high }
+  '@triage': { provider: codex, model: gpt-6.2-sol, effort: medium }
