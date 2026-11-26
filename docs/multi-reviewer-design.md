@@ -1,6 +1,8 @@
 # More than two reviewers
 
-Status: design, not implemented. The pipeline runs two reviewers today.
+Status: the pipeline runs three reviewers with all-to-all cross-checks and the median
+priority rule. The `duplicate` verdict is not implemented; a peer names its own matching
+finding in its rationale instead.
 
 ## Cross-check volume
 

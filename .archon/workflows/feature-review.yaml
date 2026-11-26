@@ -21,7 +21,7 @@ inputs:
   # How the Claude reviewer reviews; empty means its own review, as for review_a.
   claude_review_method:
     default: ''
-  # What both reviewers check and how they set priorities. The cross-checks continue the
+  # What every reviewer checks and how they set priorities. The cross-checks continue the
   # reviewers' sessions, so they apply the same scale.
   review_rules:
     default: >-
@@ -199,8 +199,19 @@ nodes:
       Return an empty findings array if appropriate.
     output_format: *review_schema
 
+  - id: review_c
+    model: '@reviewer-c'
+    context: fresh
+    depends_on: [start, implement, continue]
+    trigger_rule: none_failed_min_one_success
+    when: *reviewable
+    # A third independent review with review_a's prompt.
+    prompt: *independent_review
+    output_format: *review_schema
+
+  # Every reviewer assesses the findings of every other reviewer.
   - id: cross_check_a
-    depends_on: [review_a, review_b]
+    depends_on: [review_a, review_b, review_c]
     # A reviewer turn in a bash step, so it needs more than Archon's 5-minute bash default.
     timeout: &cross_check_timeout 1800000
     bash: |
@@ -224,8 +235,15 @@ nodes:
       required: [assessments, telemetry]
 
   - id: cross_check_b
-    depends_on: [review_a, review_b]
+    depends_on: [review_a, review_b, review_c]
     timeout: *cross_check_timeout
     bash: |
       powershell.exe -NoProfile -NonInteractive -ExecutionPolicy RemoteSigned -File "$INPUTS_CROSS_CHECK_RUNNER" -Reviewer b -ArtifactDirectory "$ARTIFACTS_DIR"
+    output_format: *cross_check_schema
+
+  - id: cross_check_c
+    depends_on: [review_a, review_b, review_c]
+    timeout: *cross_check_timeout
+    bash: |
+      powershell.exe -NoProfile -NonInteractive -ExecutionPolicy RemoteSigned -File "$INPUTS_CROSS_CHECK_RUNNER" -Reviewer c -ArtifactDirectory "$ARTIFACTS_DIR"
     output_format: *cross_check_schema

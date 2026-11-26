@@ -49,11 +49,18 @@ function Get-UsageDelta($Total, $Prior) {
     }
 }
 
-$expected = @{ review_a = 'findings'; review_b = 'findings'; cross_check_a = 'assessments'; cross_check_b = 'assessments' }
+# The reviewers are the run's review steps, whether they ran or were skipped.
+$reviewers = @($events | Where-Object { $_.step -cmatch '^review_[a-z]$' } | ForEach-Object { $_.step.Substring(7) } |
+    Sort-Object -Unique)
+$expected = @{}
+foreach ($reviewer in $reviewers) {
+    $expected["review_$reviewer"] = 'findings'
+    $expected["cross_check_$reviewer"] = 'assessments'
+}
 $outputs = @{}
 # The cross-check runner saves its full result. Archon snapshots a node's output only when a
 # later node starts, so no snapshot holds the final cross-checks.
-foreach ($id in @('cross_check_a', 'cross_check_b')) {
+foreach ($id in @($reviewers | ForEach-Object { "cross_check_$_" })) {
     $file = Join-Path $artifactDir "cross-checks\$id.json"
     if (Test-Path -LiteralPath $file -PathType Leaf) {
         $saved = Get-Content -LiteralPath $file -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -99,28 +106,62 @@ if (!$implementOutput) {
     }
 }
 
-# Every finding carries the peer's verdict, so disputed and unassessed findings stay visible.
-# A lost cross-check output is not a peer decision, so it gets its own verdict.
-$findings = @(foreach ($origin in @('a', 'b')) {
-    $peer = if ($origin -eq 'a') { 'b' } else { 'a' }
-    $review = $outputs["review_$origin"]
-    $check = $outputs["cross_check_$peer"]
-    foreach ($finding in $review.findings) {
-        $assessments = @($check.assessments | Where-Object { $_.peer_id -ceq $finding.id })
-        $assessment = if ($assessments.Count -eq 1) { $assessments[0] }
-        $verdict = if ($assessment) { $assessment.verdict } elseif ($check) { 'not_assessed' } else { 'cross_check_unavailable' }
+# A finding's priority is the median of its votes: the finder's proposed priority and each peer's
+# verdict. Disputes and requests for evidence rank below P3, and with an even number of votes the
+# lower middle vote wins. docs/multi-reviewer-design.md explains the rule.
+$voteRank = @{ P0 = 0; P1 = 1; P2 = 2; P3 = 3; dispute = 4; needs_evidence = 4 }
+function Get-MedianPriority([string[]]$Votes) {
+    $sorted = @($Votes | Sort-Object { $voteRank[$_] })
+    $median = $sorted[[math]::Floor($sorted.Count / 2)]
+    if ($voteRank[$median] -lt 4) { return $median }
+    # Both rank last; name the more common one, and a tie a dispute.
+    $unconfirmed = @($sorted | Where-Object { $voteRank[$_] -eq 4 })
+    $evidence = @($unconfirmed | Where-Object { $_ -ceq 'needs_evidence' }).Count
+    if ($evidence -gt $unconfirmed.Count - $evidence) { 'needs_evidence' } else { 'dispute' }
+}
+
+# Every finding carries each peer's verdict, so disputed and unassessed findings stay visible.
+# A lost cross-check output is not a peer decision, so it gets its own verdict, and the finding's
+# priority is unknown.
+$findings = @(foreach ($origin in $reviewers) {
+    foreach ($finding in $outputs["review_$origin"].findings) {
+        $key = "$origin/$($finding.id)"
+        $votes = [Collections.Generic.List[string]]::new()
+        $votes.Add($finding.priority)
+        $complete = $true
+        $assessments = @(foreach ($peer in @($reviewers | Where-Object { $_ -cne $origin })) {
+            $check = $outputs["cross_check_$peer"]
+            # Runs with two reviewers assessed unprefixed IDs.
+            $found = @($check.assessments | Where-Object { $_.peer_id -ceq $key -or $_.peer_id -ceq $finding.id })
+            $assessment = if ($found.Count -eq 1) { $found[0] }
+            $verdict = if ($assessment) { $assessment.verdict } elseif ($check) { 'not_assessed' } else { 'cross_check_unavailable' }
+            $vote = switch -CaseSensitive ($verdict) {
+                # A confirmation without a priority accepts the proposed one.
+                'confirmed' { if ($assessment.priority -cin @('P0', 'P1', 'P2', 'P3')) { $assessment.priority } else { $finding.priority } }
+                'disputed' { 'dispute' }
+                'needs_evidence' { 'needs_evidence' }
+                default { $null }
+            }
+            if ($vote) { $votes.Add($vote) } else { $complete = $false }
+            [pscustomobject]@{
+                Reviewer = "review_$peer"
+                Verdict = $verdict
+                Priority = $(if ($assessment) { $assessment.priority })
+                Rationale = $(if ($assessment) { $assessment.rationale })
+            }
+        })
         [pscustomobject]@{
             Origin = "review_$origin"
-            AssessedBy = "cross_check_$peer"
             Id = $finding.id
+            Key = $key
             Location = $finding.location
             Evidence = $finding.evidence
             Impact = $finding.impact
             ProposedFix = $finding.proposed_fix
             ProposedPriority = $finding.priority
-            Verdict = $verdict
-            PeerPriority = $(if ($assessment) { $assessment.priority })
-            PeerRationale = $(if ($assessment) { $assessment.rationale })
+            Assessments = $assessments
+            Votes = @($votes)
+            Priority = $(if ($complete) { Get-MedianPriority $votes } else { 'unknown' })
         }
     }
 })
@@ -185,7 +226,7 @@ $missingTokenSteps = [ordered]@{}
 foreach ($field in $tokenFields) {
     $missingTokenSteps[$field] = @($steps | Where-Object { $null -eq $_.Tokens.$field } | ForEach-Object Step)
 }
-if ($done -and ($outputs.cross_check_a.telemetry -or $outputs.cross_check_b.telemetry -or $continueTelemetry)) {
+if ($done -and @($outputs.Values | Where-Object { $_.telemetry }).Count) {
     # Archon's workflow totals omit provider turns executed by bash nodes.
     $tokenTotals = [ordered]@{}
     foreach ($field in $tokenFields) {

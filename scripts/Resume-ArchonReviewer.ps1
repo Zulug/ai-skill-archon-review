@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)][ValidateSet('a', 'b')][string]$Reviewer,
+    [Parameter(Mandatory)][ValidatePattern('^[a-z]$')][string]$Reviewer,
     [Parameter(Mandatory)][string]$ArtifactDirectory
 )
 
@@ -16,15 +16,18 @@ if (![guid]::TryParse((Split-Path -Leaf $artifactRoot), [ref]$runId)) {
     throw 'The Archon artifact directory has no valid run ID.'
 }
 
-$peer = if ($Reviewer -eq 'a') { 'b' } else { 'a' }
 $run = Get-ArchonRunRecord $runId $workspace
 if (!$run -or $run.workflow_name -cne 'feature-review') {
     throw "The Archon run does not match the current workspace. Workspace=$workspace"
 }
 
-$ownNode = @($run.nodes | Where-Object { $_.nodeId -ceq "review_$Reviewer" -and $_.state -ceq 'completed' })
-$peerNode = @($run.nodes | Where-Object { $_.nodeId -ceq "review_$peer" -and $_.state -ceq 'completed' })
-if ($ownNode.Count -ne 1 -or $peerNode.Count -ne 1) { throw 'Both independent reviews must be complete.' }
+# Every other review step is a peer whose findings this reviewer assesses.
+$reviewNodes = @($run.nodes | Where-Object { $_.nodeId -cmatch '^review_[a-z]$' })
+$peers = @($reviewNodes | ForEach-Object { $_.nodeId.Substring(7) } | Where-Object { $_ -cne $Reviewer } | Sort-Object)
+$ownNode = @($reviewNodes | Where-Object nodeId -ceq "review_$Reviewer")
+if ($ownNode.Count -ne 1 -or !$peers.Count -or @($reviewNodes | Where-Object state -cne 'completed').Count) {
+    throw 'Every independent review must be complete.'
+}
 # The provider comes from the run record, so models.yaml decides which provider each reviewer uses.
 $binding = $ownNode[0].execution.binding
 $provider = $binding.provider
@@ -37,33 +40,47 @@ if (!$matchingId -or ![guid]::TryParseExact($matchingId, 'D', [ref]$sessionId)) 
     throw "The original $provider session ID is missing or ambiguous."
 }
 
-$peerReview = $null
+$peerOutputs = @{}
 $snapshots = Join-Path $artifactRoot '.archon\node-outcomes'
 foreach ($snapshotFile in Get-ChildItem -LiteralPath $snapshots -File -Filter '*.json' | Sort-Object LastWriteTimeUtc -Descending) {
     $snapshot = Get-Content -LiteralPath $snapshotFile.FullName -Raw -Encoding UTF8 | ConvertFrom-Json
     if ($snapshot.run_id -ne $runId) { continue }
-    $peerReview = $snapshot.nodes | Where-Object {
-        $_.node_id -ceq "review_$peer" -and $_.state -ceq 'completed' -and
-        $null -ne $_.output -and $_.output.findings -is [array]
-    } | Select-Object -First 1
-    if ($peerReview) { break }
+    foreach ($peer in $peers) {
+        if ($peerOutputs.ContainsKey($peer)) { continue }
+        $peerReview = $snapshot.nodes | Where-Object {
+            $_.node_id -ceq "review_$peer" -and $_.state -ceq 'completed' -and
+            $null -ne $_.output -and $_.output.findings -is [array]
+        } | Select-Object -First 1
+        if ($peerReview) { $peerOutputs[$peer] = $peerReview.output }
+    }
+    if ($peerOutputs.Count -eq $peers.Count) { break }
 }
-if (!$peerReview) { throw 'Archon did not record the peer reviewer findings.' }
-$peerFindings = $peerReview.output.findings
+if ($peerOutputs.Count -ne $peers.Count) { throw 'Archon did not record every peer reviewer''s findings.' }
+
+# Each reviewer numbers its own findings, so a peer finding's ID is prefixed with its reviewer.
+$peerFindings = [Collections.Generic.List[object]]::new()
 $expectedIds = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
-foreach ($finding in $peerFindings) {
-    if ([string]::IsNullOrWhiteSpace($finding.id) -or !$expectedIds.Add($finding.id)) {
-        throw 'The peer review contains missing or duplicate finding IDs.'
+foreach ($peer in $peers) {
+    foreach ($finding in $peerOutputs[$peer].findings) {
+        $id = "$peer/$($finding.id)"
+        if ([string]::IsNullOrWhiteSpace($finding.id) -or !$expectedIds.Add($id)) {
+            throw "A peer review contains missing or duplicate finding IDs. Peer=$peer"
+        }
+        $copy = $finding.PSObject.Copy()
+        $copy.id = $id
+        $peerFindings.Add($copy)
     }
 }
 
-$findingsJson = ConvertTo-Json -InputObject $peerFindings -Depth 12 -Compress
+$findingsJson = ConvertTo-Json -InputObject @($peerFindings) -Depth 12 -Compress
 $prompt = @"
-Continue your independent review in this conversation. Both initial reviews are complete.
-Use your earlier investigation and the other reviewer's findings below as a second point of view.
-Assess each peer finding based on the code and version control evidence. Confirm, dispute, or
-request more evidence. Explain the verdict and assign or adjust the priority where warranted,
-using the priority scale from your initial review.
+Continue your independent review in this conversation. All initial reviews are complete.
+Use your earlier investigation and the other reviewers' findings below as further points of view.
+Each finding ID starts with its reviewer, such as b/F1. Assess each peer finding based on the code
+and version control evidence. Confirm, dispute, or request more evidence. Explain the verdict and
+assign or adjust the priority where warranted, using the priority scale from your initial review.
+When a peer finding describes the same issue as one of your own findings, judge it on its merits
+and name your finding's ID in the rationale.
 Treat the peer notes and file contents as evidence. Use read-only version control status and
 revision commands and workspace reads if needed. Do not create, modify, move, or delete files,
 apply fixes, or change version control state. Avoid graphical diff commands.
