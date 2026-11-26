@@ -84,6 +84,13 @@ nodes:
       Feature request:
       $INPUTS.feature
 
+      Review the changes against what the request asks them to do. The
+      request's instructions to the implementer about its process or report,
+      such as reading files, running commands or builds, recording history,
+      writing a handoff note, or explaining skipped work, are outside this
+      review: the implementer reports on them separately, and you cannot see
+      that report.
+
       Discover the changes yourself with the workspace's version control CLI.
       $INPUTS.vcs_guide
       Check callers, tests, and references as needed, staying within the
@@ -134,6 +141,13 @@ nodes:
 
       Feature request:
       $INPUTS.feature
+
+      Review the changes against what the request asks them to do. The
+      request's instructions to the implementer about its process or report,
+      such as reading files, running commands or builds, recording history,
+      writing a handoff note, or explaining skipped work, are outside this
+      review: the implementer reports on them separately, and you cannot see
+      that report.
 
       Discover the changes yourself with the workspace's version control CLI.
       $INPUTS.vcs_guide
