@@ -3,8 +3,18 @@ description: Optionally implement a feature, then independently review the works
 inputs:
   feature:
     required: true
+  # implement, review (the pending changes only), or continue (an earlier run's implementer
+  # session applies corrections, then the changes are reviewed).
   mode:
     default: implement
+  # Continue mode: what the implementer must correct.
+  corrections:
+    default: ''
+  # Continue mode: JSON naming the implementer session and its usage so far.
+  implementer_session:
+    default: ''
+  continue_runner:
+    default: ''
   # How to find the changes under review with this workspace's version control.
   vcs_guide:
     required: true
@@ -71,13 +81,35 @@ nodes:
         questions: { type: array, items: { type: string } }
       required: [status, summary, assumptions, questions]
 
+  # Archon starts every CLI run's agent sessions fresh, so a script resumes the implementer's
+  # own session with the provider, model, and effort its first run recorded.
+  - id: continue
+    depends_on: [start]
+    when: "$INPUTS.mode == 'continue'"
+    # Archon stops a bash step after 5 minutes unless it sets a timeout in milliseconds, and an
+    # implementer turn can take longer.
+    timeout: 3600000
+    bash: |
+      powershell.exe -NoProfile -NonInteractive -ExecutionPolicy RemoteSigned -File "$INPUTS_CONTINUE_RUNNER" -ArtifactDirectory "$ARTIFACTS_DIR"
+    output_format:
+      type: object
+      additionalProperties: false
+      properties:
+        status: { type: string, enum: [implemented, blocked] }
+        summary: { type: string }
+        assumptions: { type: array, items: { type: string } }
+        questions: { type: array, items: { type: string } }
+        telemetry: { type: object }
+      required: [status, summary, assumptions, questions, telemetry]
+
   - id: review_a
     model: '@reviewer-a'
     context: fresh
-    depends_on: [start, implement]
+    depends_on: [start, implement, continue]
     trigger_rule: none_failed_min_one_success
-    # Review mode skips implement; a blocked implementer skips the review.
-    when: &reviewable "$INPUTS.mode != 'implement' || $implement.output.status == 'implemented'"
+    # Review mode skips the implementer; a blocked implementer skips the review. Each output
+    # reference is guarded by its mode, because a skipped step has no output to read.
+    when: &reviewable "$INPUTS.mode == 'review' || $INPUTS.mode == 'implement' && $implement.output.status == 'implemented' || $INPUTS.mode == 'continue' && $continue.output.status == 'implemented'"
     prompt: &independent_review |
       Review the changes in the current workspace independently.
 
@@ -132,7 +164,7 @@ nodes:
     # Claude Code, so validation warns that it has no skill folder; that is expected.
     skills: [code-review]
     context: fresh
-    depends_on: [start, implement]
+    depends_on: [start, implement, continue]
     trigger_rule: none_failed_min_one_success
     when: *reviewable
     # Same review as review_a, plus the Claude-specific review method.
@@ -169,6 +201,8 @@ nodes:
 
   - id: cross_check_a
     depends_on: [review_a, review_b]
+    # A reviewer turn in a bash step, so it needs more than Archon's 5-minute bash default.
+    timeout: &cross_check_timeout 1800000
     bash: |
       powershell.exe -NoProfile -NonInteractive -ExecutionPolicy RemoteSigned -File "$INPUTS_CROSS_CHECK_RUNNER" -Reviewer a -ArtifactDirectory "$ARTIFACTS_DIR"
     output_format: &cross_check_schema
@@ -191,6 +225,7 @@ nodes:
 
   - id: cross_check_b
     depends_on: [review_a, review_b]
+    timeout: *cross_check_timeout
     bash: |
       powershell.exe -NoProfile -NonInteractive -ExecutionPolicy RemoteSigned -File "$INPUTS_CROSS_CHECK_RUNNER" -Reviewer b -ArtifactDirectory "$ARTIFACTS_DIR"
     output_format: *cross_check_schema

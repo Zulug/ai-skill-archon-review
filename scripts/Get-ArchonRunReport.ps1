@@ -6,6 +6,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'ArchonSession.ps1')
 $log = Get-Item -LiteralPath $Transcript
 $events = @(Get-Content -LiteralPath $log.FullName -Encoding UTF8 | ForEach-Object {
     if (-not [string]::IsNullOrWhiteSpace($_)) { ConvertFrom-Json -InputObject $_ }
@@ -58,6 +59,12 @@ foreach ($id in @('cross_check_a', 'cross_check_b')) {
         $saved = Get-Content -LiteralPath $file -Raw -Encoding UTF8 | ConvertFrom-Json
         if ($saved.PSObject.Properties['assessments']) { $outputs[$id] = $saved }
     }
+}
+# The continue step saves its full result too, because a blocked answer starts no later node.
+$continueFile = Join-Path $artifactDir 'implementer\continue.json'
+if (Test-Path -LiteralPath $continueFile -PathType Leaf) {
+    $saved = Get-Content -LiteralPath $continueFile -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ($saved.PSObject.Properties['status']) { $outputs['continue'] = $saved }
 }
 # Archon records the structured review outputs in cumulative node snapshots. Older runs also
 # have cross-check outputs there, captured when a later triage node started.
@@ -138,29 +145,37 @@ $steps = @(foreach ($node in ($events | Where-Object type -eq 'node_complete')) 
 })
 
 # Codex reports session-to-date tokens on resume, and Claude reports session-to-date cost.
-# Subtract the original review turn so each cross-check shows its own usage.
+# Subtract the session's earlier turns so each resumed step shows its own usage.
 $problems = [Collections.Generic.List[string]]::new()
+function Set-ResumedTurnUsage($Step, $PriorTokens, $PriorUsd, [string]$PriorLabel) {
+    if ($Step.Provider -eq 'codex') {
+        $turn = if ($PriorTokens) { Get-UsageDelta $Step.Tokens $PriorTokens }
+        if ($turn) {
+            $Step.Tokens = $turn
+            $Step.UsageNote = "Tokens derived: session total minus $PriorLabel."
+        } elseif ($Step.Tokens) {
+            $Step.UsageNote = "Tokens are the session total, including $PriorLabel."
+            $problems.Add("$($Step.Step) tokens are the session total; token totals also count $PriorLabel.")
+        }
+    } elseif ($Step.Provider -eq 'claude' -and $null -ne $Step.RecordedUsd) {
+        if ($null -ne $PriorUsd -and [decimal]$Step.RecordedUsd -ge [decimal]$PriorUsd) {
+            $Step.RecordedUsd = [decimal]$Step.RecordedUsd - [decimal]$PriorUsd
+            $Step.UsageNote = "Cost derived: session total minus $PriorLabel."
+        } else {
+            $Step.UsageNote = "Cost is the session total, including $PriorLabel."
+            $problems.Add("$($Step.Step) cost is the session total; the cost total also counts $PriorLabel.")
+        }
+    }
+}
 foreach ($check in @($steps | Where-Object { $_.Step -like 'cross_check_*' })) {
     $reviewStep = 'review_' + $check.Step.Substring($check.Step.Length - 1)
     $review = $steps | Where-Object Step -eq $reviewStep | Select-Object -First 1
-    if ($check.Provider -eq 'codex') {
-        $turn = if ($review) { Get-UsageDelta $check.Tokens $review.Tokens }
-        if ($turn) {
-            $check.Tokens = $turn
-            $check.UsageNote = "Tokens derived: session total minus $reviewStep."
-        } elseif ($check.Tokens) {
-            $check.UsageNote = 'Tokens are the session total, including the review turn.'
-            $problems.Add("$($check.Step) tokens are the session total; token totals count $reviewStep twice.")
-        }
-    } elseif ($check.Provider -eq 'claude' -and $null -ne $check.RecordedUsd) {
-        if ($review -and $null -ne $review.RecordedUsd -and [decimal]$check.RecordedUsd -ge [decimal]$review.RecordedUsd) {
-            $check.RecordedUsd = [decimal]$check.RecordedUsd - [decimal]$review.RecordedUsd
-            $check.UsageNote = "Cost derived: session total minus $reviewStep."
-        } else {
-            $check.UsageNote = 'Cost is the session total, including the review turn.'
-            $problems.Add("$($check.Step) cost is the session total; the cost total counts $reviewStep twice.")
-        }
-    }
+    Set-ResumedTurnUsage $check $review.Tokens $review.RecordedUsd $reviewStep
+}
+# The continue step's earlier turns ran in earlier runs, so it recorded their usage itself.
+$continueTelemetry = $outputs['continue'].telemetry
+foreach ($step in @($steps | Where-Object Step -eq 'continue')) {
+    Set-ResumedTurnUsage $step (Read-TokenUsage $continueTelemetry.prior_tokens) $continueTelemetry.prior_cost_usd 'the earlier implementer turns'
 }
 
 $tokenTotals = Read-TokenUsage $done.tokens
@@ -170,7 +185,7 @@ $missingTokenSteps = [ordered]@{}
 foreach ($field in $tokenFields) {
     $missingTokenSteps[$field] = @($steps | Where-Object { $null -eq $_.Tokens.$field } | ForEach-Object Step)
 }
-if ($done -and ($outputs.cross_check_a.telemetry -or $outputs.cross_check_b.telemetry)) {
+if ($done -and ($outputs.cross_check_a.telemetry -or $outputs.cross_check_b.telemetry -or $continueTelemetry)) {
     # Archon's workflow totals omit provider turns executed by bash nodes.
     $tokenTotals = [ordered]@{}
     foreach ($field in $tokenFields) {
@@ -185,50 +200,55 @@ if ($done -and ($outputs.cross_check_a.telemetry -or $outputs.cross_check_b.tele
     }
 }
 
-# Resuming the implementer's own session lets the user ask why it wrote the code as it did.
-# The transcript keeps only a session ID prefix, so the full ID comes from Archon's run record.
+# Resuming the implementer's own session lets the user ask why it wrote the code as it did, and
+# lets a later run continue it with corrections. A continue step recorded its session itself;
+# for the implement step, the transcript keeps only a session ID prefix, so the full ID comes
+# from Archon's run record.
 $implementer = $null
-$implementNode = $events | Where-Object { $_.type -eq 'node_complete' -and $_.step -eq 'implement' } | Select-Object -Last 1
+$implementNode = $events | Where-Object { $_.type -eq 'node_complete' -and $_.step -in @('implement', 'continue') } |
+    Select-Object -Last 1
 if ($implementNode) {
+    $root = (Get-Item -LiteralPath $Workspace).FullName
+    $continued = $implementNode.step -eq 'continue'
+    if ($continued) { $implementOutput = $outputs['continue'] }
     $binding = $implementNode.execution.binding
     # A blocked implementer skips the review; the user answers its questions by rerunning.
     $implementer = [pscustomobject]@{
+        Step = $implementNode.step
         Status = $implementOutput.status
         Summary = $implementOutput.summary
         Assumptions = @($implementOutput.assumptions | Where-Object { $_ })
         Questions = @($implementOutput.questions | Where-Object { $_ })
-        Provider = $binding.provider
-        Model = $binding.model.requested
-        Effort = $binding.effort
-        SessionId = $null
+        Provider = if ($continued) { $continueTelemetry.provider } else { $binding.provider }
+        Model = if ($continued) { $continueTelemetry.model } else { $binding.model.requested }
+        Effort = if ($continued) { $continueTelemetry.effort } else { $binding.effort }
+        SessionId = $(if ($continued) { $continueTelemetry.session_id })
+        # Usage to date of the whole session, which a later continuation subtracts from its own.
+        SessionUsage = [pscustomobject]@{
+            Tokens = if ($continued) { $continueTelemetry.tokens } else { $implementNode.tokens }
+            CostUsd = if ($continued) { $continueTelemetry.cost_usd } else { $implementNode.cost_usd }
+        }
         ResumeCommand = $null
         Note = $null
     }
     if (!$implementOutput) { $problems.Add('The implementer''s answer is missing, so its status is unknown.') }
-    $root = (Get-Item -LiteralPath $Workspace).FullName
-    $archonCommand = Get-Command archon.exe -ErrorAction SilentlyContinue
-    $archon = if ($archonCommand) { $archonCommand.Source } else { Join-Path $env:USERPROFILE '.archon\bin\archon.exe' }
-    # Windows PowerShell turns redirected native stderr into errors under 'Stop'.
-    $runJson = & { $ErrorActionPreference = 'Continue'; & $archon workflow get $runId.ToString() --verbose --json --cwd $root 2>$null }
-    $run = if ($LASTEXITCODE -eq 0 -and $runJson) { ($runJson -join [Environment]::NewLine) | ConvertFrom-Json }
-    if (!$run -or $run.id -ne $runId -or $run.working_path -ine $root) {
-        $implementer.Note = "Archon has no record of this run for the workspace. Workspace=$root"
-    } else {
-        $node = $run.nodes | Where-Object nodeId -ceq 'implement' | Select-Object -First 1
-        $ids = @($node.sessionIds | Where-Object {
-            $_ -is [string] -and $binding.sessionPreview -and $_.StartsWith($binding.sessionPreview, [StringComparison]::OrdinalIgnoreCase)
-        })
-        if ($ids.Count -eq 1) { $implementer.SessionId = $ids[0] }
-        else { $implementer.Note = 'The implementer session ID is missing or ambiguous.' }
+    if (!$continued) {
+        $run = Get-ArchonRunRecord $runId $root
+        if (!$run) {
+            $implementer.Note = "Archon has no record of this run for the workspace. Workspace=$root"
+        } else {
+            $node = $run.nodes | Where-Object nodeId -ceq 'implement' | Select-Object -First 1
+            $implementer.SessionId = Find-ArchonSessionId $node $binding
+            if (!$implementer.SessionId) { $implementer.Note = 'The implementer session ID is missing or ambiguous.' }
+        }
+    } elseif (!$implementer.SessionId) {
+        $implementer.Note = 'The continue step did not record the implementer session.'
     }
     if ($implementer.SessionId -and $implementer.Status -ne 'blocked') {
         $quotedRoot = "'" + $root.Replace("'", "''") + "'"
         if ($implementer.Provider -eq 'codex') {
-            $codex = Get-Command codex.exe -ErrorAction SilentlyContinue
-            $codexPath = if ($codex) { $codex.Source } else {
-                $app = Get-AppxPackage -Name OpenAI.Codex -ErrorAction SilentlyContinue
-                if ($app) { Join-Path $app.InstallLocation 'app\resources\codex.exe' } else { 'codex' }
-            }
+            $codexPath = Get-CodexExecutable
+            if (!$codexPath) { $codexPath = 'codex' }
             $command = "& '$($codexPath.Replace("'", "''"))' resume $($implementer.SessionId) -C $quotedRoot -s read-only"
             if ($implementer.Model) { $command += " -m $($implementer.Model)" }
             if ($implementer.Effort) { $command += " -c model_reasoning_effort=$($implementer.Effort)" }
