@@ -61,6 +61,7 @@ foreach ($id in @('cross_check_a', 'cross_check_b')) {
 }
 # Archon records the structured review outputs in cumulative node snapshots. Older runs also
 # have cross-check outputs there, captured when a later triage node started.
+$implementOutput = $null
 $snapshotDir = Join-Path $artifactDir '.archon\node-outcomes'
 if (Test-Path -LiteralPath $snapshotDir -PathType Container) {
     foreach ($file in (Get-ChildItem -LiteralPath $snapshotDir -File -Filter '*.json' | Sort-Object LastWriteTimeUtc -Descending)) {
@@ -68,12 +69,26 @@ if (Test-Path -LiteralPath $snapshotDir -PathType Container) {
         if ($snapshot.run_id -ne $start.workflow_id) { continue }
         foreach ($node in $snapshot.nodes) {
             $id = $node.node_id
+            if ($id -eq 'implement' -and !$implementOutput -and $node.state -eq 'completed' -and
+                $node.output.PSObject.Properties['status']) {
+                $implementOutput = $node.output
+            }
             if ($id -and $expected.ContainsKey($id) -and -not $outputs.ContainsKey($id) -and
                 $node.state -eq 'completed' -and $null -ne $node.output -and $node.output.PSObject.Properties[$expected[$id]]) {
                 $outputs[$id] = $node.output
             }
         }
-        if ($outputs.Count -eq $expected.Count) { break }
+        if ($outputs.Count -eq $expected.Count -and $implementOutput) { break }
+    }
+}
+# A blocked run starts no node after implement, so no snapshot holds its answer. Codex sends
+# its structured answer as the step's last message.
+if (!$implementOutput) {
+    $lastMessage = ($events | Where-Object { $_.step -eq 'implement' -and $_.event.type -eq 'agent_message_chunk' } |
+        Select-Object -Last 1).event.text
+    if ($lastMessage) {
+        try { $parsed = $lastMessage | ConvertFrom-Json -ErrorAction Stop } catch { $parsed = $null }
+        if ($parsed -and $parsed.PSObject.Properties['status']) { $implementOutput = $parsed }
     }
 }
 
@@ -109,11 +124,6 @@ $steps = @(foreach ($node in ($events | Where-Object type -eq 'node_complete')) 
     if (!$binding.provider -and !$resumeTurn) { continue }
     $model = $binding.model
     $durationMs = if ($resumeTurn) { $resumeTurn.duration_ms } else { $node.duration_ms }
-    $response = $null
-    if ($node.step -eq 'implement') {
-        $response = ($events | Where-Object { $_.step -eq 'implement' -and $_.event.type -eq 'agent_message_chunk' } |
-            Select-Object -Last 1).event.text
-    }
     [pscustomobject]@{
         Step = $node.step
         Provider = if ($resumeTurn) { $resumeTurn.provider } else { $binding.provider }
@@ -121,7 +131,6 @@ $steps = @(foreach ($node in ($events | Where-Object type -eq 'node_complete')) 
         DurationSeconds = $(if ($null -ne $durationMs) { [math]::Round($durationMs / 1000, 3) })
         Tokens = if ($resumeTurn) { Read-TokenUsage $resumeTurn.tokens } else { Read-TokenUsage $node.tokens }
         RecordedUsd = if ($resumeTurn) { $resumeTurn.cost_usd } else { $node.cost_usd }
-        Response = $response
         FindingsCount = $(if ($outputs[$node.step] -and $expected[$node.step] -eq 'findings') { @($outputs[$node.step].findings).Count })
         AssessmentsCount = $(if ($outputs[$node.step] -and $expected[$node.step] -eq 'assessments') { @($outputs[$node.step].assessments).Count })
         UsageNote = $null
@@ -182,7 +191,12 @@ $implementer = $null
 $implementNode = $events | Where-Object { $_.type -eq 'node_complete' -and $_.step -eq 'implement' } | Select-Object -Last 1
 if ($implementNode) {
     $binding = $implementNode.execution.binding
+    # A blocked implementer skips the review; the user answers its questions by rerunning.
     $implementer = [pscustomobject]@{
+        Status = $implementOutput.status
+        Summary = $implementOutput.summary
+        Assumptions = @($implementOutput.assumptions | Where-Object { $_ })
+        Questions = @($implementOutput.questions | Where-Object { $_ })
         Provider = $binding.provider
         Model = $binding.model.requested
         Effort = $binding.effort
@@ -190,6 +204,7 @@ if ($implementNode) {
         ResumeCommand = $null
         Note = $null
     }
+    if (!$implementOutput) { $problems.Add('The implementer''s answer is missing, so its status is unknown.') }
     $root = (Get-Item -LiteralPath $Workspace).FullName
     $archonCommand = Get-Command archon.exe -ErrorAction SilentlyContinue
     $archon = if ($archonCommand) { $archonCommand.Source } else { Join-Path $env:USERPROFILE '.archon\bin\archon.exe' }
@@ -206,7 +221,7 @@ if ($implementNode) {
         if ($ids.Count -eq 1) { $implementer.SessionId = $ids[0] }
         else { $implementer.Note = 'The implementer session ID is missing or ambiguous.' }
     }
-    if ($implementer.SessionId) {
+    if ($implementer.SessionId -and $implementer.Status -ne 'blocked') {
         $quotedRoot = "'" + $root.Replace("'", "''") + "'"
         if ($implementer.Provider -eq 'codex') {
             $codex = Get-Command codex.exe -ErrorAction SilentlyContinue
@@ -230,7 +245,9 @@ if ($implementNode) {
     }
 }
 
-$missingOutputs = @($expected.Keys | Where-Object { -not $outputs.ContainsKey($_) } | Sort-Object)
+$missingOutputs = @(if ($implementer.Status -ne 'blocked') {
+    $expected.Keys | Where-Object { -not $outputs.ContainsKey($_) } | Sort-Object
+})
 if ($done -and $missingOutputs.Count) {
     $problems.Insert(0, "The run completed, but these outputs are missing: $($missingOutputs -join ', '). Their verdicts are unknown.")
 }

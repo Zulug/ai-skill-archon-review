@@ -43,17 +43,41 @@ nodes:
       Request:
       $INPUTS.feature
 
+      Nobody can answer questions while you work. Before editing, decide
+      whether the request is clear enough. Return status blocked without
+      changing anything only when the request has several reasonable
+      readings that lead to materially different implementations, and the
+      code, the instruction files, and the guidelines they reference do not
+      settle which one is meant. List the questions the user must answer; the
+      user then reruns with a clearer request. For smaller gaps, choose the
+      most reasonable reading, implement it, and record it in assumptions. If
+      you find such a blocker after you have started editing, stop, keep your
+      edits, return blocked, and name the files you changed in the summary.
+
       Leave every change uncommitted in this workspace. Do not commit, check
       in, stash, shelve, push, create or switch branches, or change the
       workspace's base revision. The user commits manually. Preserve
-      unrelated uncommitted changes.
-      Summarize the changes and the checks you ran.
+      unrelated uncommitted changes. Do not write handover or notes files;
+      your response is the handover.
+      When implemented, summarize the changes and the checks you ran, and put
+      anything the human reviewer should decide or know in questions.
+    output_format:
+      type: object
+      additionalProperties: false
+      properties:
+        status: { type: string, enum: [implemented, blocked] }
+        summary: { type: string }
+        assumptions: { type: array, items: { type: string } }
+        questions: { type: array, items: { type: string } }
+      required: [status, summary, assumptions, questions]
 
   - id: review_a
     model: '@reviewer-a'
     context: fresh
     depends_on: [start, implement]
     trigger_rule: none_failed_min_one_success
+    # Review mode skips implement; a blocked implementer skips the review.
+    when: &reviewable "$INPUTS.mode != 'implement' || $implement.output.status == 'implemented'"
     prompt: &independent_review |
       Review the changes in the current workspace independently.
 
@@ -103,6 +127,7 @@ nodes:
     context: fresh
     depends_on: [start, implement]
     trigger_rule: none_failed_min_one_success
+    when: *reviewable
     # Same review as review_a, plus the Claude-specific review method.
     prompt: |
       Review the changes in the current workspace independently.
