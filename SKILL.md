@@ -19,8 +19,9 @@ Use [Invoke-ArchonReview.ps1](Invoke-ArchonReview.ps1), which runs the [feature-
    ```
 
    The runner detects the version control system. Plastic takes precedence when a workspace also contains a `.git` folder. Three reviewers review the uncommitted changes, as `models.yaml` assigns them:
-   - Reviewers A and C use the plain review prompt.
+   - Reviewer A uses the plain review prompt.
    - Reviewer B, the Claude reviewer, runs Claude Code's `code-review` skill at level `high` in a git repository and returns its verified findings. In Plastic it uses the plain review prompt.
+   - Reviewer C uses the `pr-review-board` skill, which must be installed next to this skill. In Plastic it captures the pending changes with the sibling `plastic-scm` skill's `local-diff` helper, which writes its capture under the system temporary directory. In git it uses git commands instead.
 
    In a git repository, add `-Base <revision>`, such as `-Base main`, only when the user asks to review the branch's changes since that revision; the review then also covers the branch's commits.
 

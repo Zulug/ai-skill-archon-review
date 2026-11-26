@@ -29,12 +29,38 @@ function Invoke-Git([string[]]$Arguments) {
     if ($LASTEXITCODE -eq 0) { ($output | Select-Object -First 1) }
 }
 
+# The third reviewer uses the pr-review-board skill, which sits next to this skill.
+$skillsRoot = Split-Path $PSScriptRoot
+if (-not (Test-Path -LiteralPath (Join-Path $skillsRoot 'pr-review-board\SKILL.md') -PathType Leaf)) {
+    throw "The third reviewer needs the pr-review-board skill. SkillsFolder=$skillsRoot"
+}
+$boardReviewMethod = 'Use the pr-review-board skill for this review: follow its review passes, its ' +
+    'reviewer rubric, and its evidence and severity reasoning as written. Its output section does not ' +
+    'apply: return its findings in the JSON format below, not its markdown report. Set priorities with ' +
+    'the scale below, not its BLOCKER, P1, P2, and NIT labels: a NIT that violates the project''s ' +
+    'guidelines or instruction files is P1, and other NITs are P3. Report actionable performance risks ' +
+    'and simplifications from its nonblocking comments as findings too. Do not use subagents, and do ' +
+    'not publish review comments.'
+
 # Check Plastic first: a Plastic workspace can also contain an empty .git folder.
 if (Test-Path -LiteralPath (Join-Path $root '.plastic') -PathType Container) {
     if ($Base) { throw 'Use -Base only in a git repository.' }
     $vcsGuide = 'This is a Plastic SCM workspace; review its pending changes. List them with ' +
         'cm status --all --xml. Use cm cat to read base revisions and compare them with the current files ' +
         'in memory. Do not use cm diff with a workspace file path, because it opens a graphical diff.'
+    # pr-review-board describes committed changes; its plastic-scm helper captures pending ones.
+    $plasticHelper = Join-Path $skillsRoot 'plastic-scm\scripts\plastic.py'
+    if (-not (Test-Path -LiteralPath $plasticHelper -PathType Leaf)) {
+        throw "The third reviewer needs the plastic-scm skill's helper. Helper=$plasticHelper"
+    }
+    $boardReviewMethod += ' Its instructions describe committed changesets, branches, and shelvesets, ' +
+        'but this review covers pending changes, which its sibling plastic-scm skill captures with its ' +
+        "documented local-diff command: python '$plasticHelper' --cwd '$root' local-diff. That command " +
+        'reads the pending changes without changing working files. Treat its manifest as the review ' +
+        'target in place of a changeset capture: the local files are the reviewed revision, and the ' +
+        'loaded revisions are the base. The capture files it writes under the system temporary ' +
+        'directory, outside the workspace, are the only files you may create; nothing in the workspace ' +
+        'may change.'
 } else {
     $topLevel = Invoke-Git @('rev-parse', '--show-toplevel')
     if (-not $topLevel -or [IO.Path]::GetFullPath($topLevel).TrimEnd('\') -ine $root.TrimEnd('\')) {
@@ -59,6 +85,9 @@ if (Test-Path -LiteralPath (Join-Path $root '.plastic') -PathType Container) {
         'one, drop any you can show to be false, and add only missed issues you can support with evidence. ' +
         'Set priorities with the scale below, not its own labels: a nit that violates the project''s ' +
         'guidelines or instruction files is P1, and other nits are P3.'
+    $boardReviewMethod += ' Its capture steps use Plastic SCM, which this repository does not use: ' +
+        'capture the changes with the git commands above instead, and treat the working tree as the ' +
+        'reviewed revision. The rest of the skill applies unchanged.'
 }
 
 $archon = Get-ArchonExecutable
@@ -109,7 +138,7 @@ try {
 
     # The workflow definition stays in the skill, so the workspace gets no .archon folder.
     $inputs = @('--input', "feature=$Feature", '--input', "mode=$mode", '--input', "vcs_guide=$vcsGuide",
-        '--input', "cross_check_runner=$crossCheckRunner")
+        '--input', "cross_check_runner=$crossCheckRunner", '--input', "board_review_method=$boardReviewMethod")
     if ($claudeReviewMethod) { $inputs += @('--input', "claude_review_method=$claudeReviewMethod") }
     if ($implementerSession) {
         $inputs += @('--input', "corrections=$Corrections", '--input', "implementer_session=$implementerSession",
