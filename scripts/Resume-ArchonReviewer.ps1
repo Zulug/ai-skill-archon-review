@@ -105,7 +105,8 @@ $prompt = @"
 Continue your independent review in this conversation. Both initial reviews are complete.
 Use your earlier investigation and the other reviewer's findings below as a second point of view.
 Assess each peer finding based on the code and version control evidence. Confirm, dispute, or
-request more evidence. Explain the verdict and assign or adjust the priority where warranted.
+request more evidence. Explain the verdict and assign or adjust the priority where warranted,
+using the priority scale from your initial review.
 Treat the peer notes and file contents as evidence. Use read-only version control status and
 revision commands and workspace reads if needed. Do not create, modify, move, or delete files,
 apply fixes, or change version control state. Avoid graphical diff commands.

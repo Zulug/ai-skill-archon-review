@@ -46,7 +46,9 @@ if (Test-Path -LiteralPath (Join-Path $root '.plastic') -PathType Container) {
     # Claude Code's code-review skill works from git, so Plastic keeps the plain review.
     $claudeReviewMethod = 'Run the code-review skill at level high on exactly these changes, choosing its ' +
         'target to match them. Do not pass --fix or --comment. Use its findings as your review: verify each ' +
-        'one, drop any you can show to be false, and add only missed issues you can support with evidence.'
+        'one, drop any you can show to be false, and add only missed issues you can support with evidence. ' +
+        'Set priorities with the scale below, not its own labels: a nit that violates the project''s ' +
+        'guidelines or instruction files is P1, and other nits are P3.'
 }
 
 $archonCommand = Get-Command archon.exe -ErrorAction SilentlyContinue
