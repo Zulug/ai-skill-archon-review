@@ -18,7 +18,7 @@ Use [Invoke-ArchonReview.ps1](Invoke-ArchonReview.ps1), which runs the [feature-
      -Workspace $projectRoot -Feature $featureRequest
    ```
 
-   The runner detects the version control system. Plastic takes precedence when a workspace also contains a `.git` folder. Reviewers review the uncommitted changes. In a git repository, add `-Base <revision>`, such as `-Base main`, only when the user asks to review the branch's changes since that revision; the review then also covers the branch's commits.
+   The runner detects the version control system. Plastic takes precedence when a workspace also contains a `.git` folder. Reviewers review the uncommitted changes. In a git repository, the Claude reviewer runs Claude Code's `code-review` skill at level `high` and returns its verified findings; in Plastic, both reviewers use the plain review prompt. In a git repository, add `-Base <revision>`, such as `-Base main`, only when the user asks to review the branch's changes since that revision; the review then also covers the branch's commits.
 4. Keep monitoring the same run until it reaches a terminal outcome. Save the exact path it prints after `[workflow] Transcript:`. If it fails, use that transcript to explain what ran, what stayed uncommitted, and the blocker. Avoid a second launch while the first is active or if its outcome is unknown. Reviewers inspect the changes directly using read-only version control commands and start independently. After both finish, Archon sends each the peer's findings as a second turn in its original session. The runner requires the exact session ID and stops the cross-check if that session cannot be resumed.
 
 ## Return a concise protocol

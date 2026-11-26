@@ -43,6 +43,10 @@ if (Test-Path -LiteralPath (Join-Path $root '.plastic') -PathType Container) {
             'lists them, including untracked files, and git --no-pager diff HEAD shows the tracked changes. ' +
             'Use git show HEAD:<path> for base versions.'
     }
+    # Claude Code's code-review skill works from git, so Plastic keeps the plain review.
+    $claudeReviewMethod = 'Run the code-review skill at level high on exactly these changes, choosing its ' +
+        'target to match them. Do not pass --fix or --comment. Use its findings as your review: verify each ' +
+        'one, drop any you can show to be false, and add only missed issues you can support with evidence.'
 }
 
 $archonCommand = Get-Command archon.exe -ErrorAction SilentlyContinue
@@ -75,9 +79,11 @@ try {
     if (Test-Path -LiteralPath (Join-Path $gitBin 'bash.exe')) { $env:PATH = "$gitBin;$priorPath" }
 
     # The workflow definition stays in the skill, so the workspace gets no .archon folder.
+    $inputs = @('--input', "feature=$Feature", '--input', "mode=$mode", '--input', "vcs_guide=$vcsGuide",
+        '--input', "cross_check_runner=$crossCheckRunner")
+    if ($claudeReviewMethod) { $inputs += @('--input', "claude_review_method=$claudeReviewMethod") }
     & $archon workflow run feature-review --folder --cwd $root --config $settings `
-        --workflow-source $PSScriptRoot --input "feature=$Feature" --input "mode=$mode" `
-        --input "vcs_guide=$vcsGuide" --input "cross_check_runner=$crossCheckRunner"
+        --workflow-source $PSScriptRoot @inputs
     if ($LASTEXITCODE -ne 0) { throw 'The Archon workflow failed. Inspect the run before continuing.' }
 } finally {
     $env:CODEX_BIN_PATH = $priorCodex
